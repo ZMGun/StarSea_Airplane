@@ -174,36 +174,19 @@ function handleWindowResize() {
 
 function handleKeyDown(event) {
   var k = event.key.toLowerCase();
-  if (keys.hasOwnProperty(k)) keys[k] = true;
-
-  if (['w', 'a', 's', 'd'].includes(k)) {
+  
+  if (['d', 'f', 'j', 'k'].includes(k)) {
+    keys[k] = true;
     if (!event.repeat) {
-      startQuat.copy(airplane.mesh.quaternion);
-      game.bankingDist = 30.0; // 기울기 애니메이션 초기화
+      startQuat.copy(airplane.mesh.quaternion); // 회전 보간용 시작점 캡처
     }
-  }
-
-  if (k === 'o') {
-    cameraMode = 2; // FPS
-    controls.enabled = false;
-  } else if (k === 'p') {
-    cameraMode = 3; // Topview
-    controls.enabled = false;
-  } else if (k === ' ') {
-    cameraMode = 0; // 기본 시점 (Tracking)
-    controls.enabled = false;
   }
 }
+
 function handleKeyUp(event) {
   var k = event.key.toLowerCase();
-  if (keys.hasOwnProperty(k)) keys[k] = false;
-  
-  // 다중 키 입력 중 하나를 떼었을 때, 남은 키의 방향으로 부드럽게 전환하기 위해 애니메이션 리셋
-  if (['w', 'a', 's', 'd'].includes(k)) {
-    if (keys.w || keys.a || keys.s || keys.d) {
-      startQuat.copy(airplane.mesh.quaternion);
-      game.bankingDist = 30.0;
-    }
+  if (['d', 'f', 'j', 'k'].includes(k)) {
+    keys[k] = false;
   }
 }
 
@@ -976,27 +959,15 @@ function loop() {
   sky.moveClouds();
   sea.moveWaves();
 
-  if (cameraMode !== 1) {
-    if (cameraMode === 0) {
-      cameraTargetPos.set(0, airplaneHolder.position.y, 200);
-      cameraTargetQuat.setFromEuler(new THREE.Euler(0, 0, 0));
-    } else if (cameraMode === 2) {
-      // airplaneHolder의 위치 이동이 반영되도록 수동으로 matrix 업데이트
-      airplaneHolder.updateMatrixWorld(true);
-      airplane.fpsCameraTarget.getWorldPosition(cameraTargetPos);
-      airplane.fpsCameraTarget.getWorldQuaternion(cameraTargetQuat);
-    } else if (cameraMode === 3) {
-      cameraTargetPos.set(airplaneHolder.position.x, airplaneHolder.position.y + 200, airplaneHolder.position.z);
-      cameraTargetQuat.setFromEuler(new THREE.Euler(-Math.PI / 2, 0, 0));
-    }
+  var rhythmCameraPos = new THREE.Vector3(-150, 300, 0); // x: 뒤로, y: 위로 (트랙이 잘 보이게 조절)
+  var rhythmCameraTarget = new THREE.Vector3(0, 200, 0); // 판정선(비행기) 쪽을 바라봄
 
-    var lerpFactor = (cameraMode === 2) ? 0.3 : 0.05;
-    camera.position.lerp(cameraTargetPos, lerpFactor);
-    camera.quaternion.slerp(cameraTargetQuat, lerpFactor);
-  } else {
-    controls.target.copy(airplaneHolder.position);
-    controls.update();
-  }
+  camera.position.lerp(rhythmCameraPos, 0.1);
+
+  var m = new THREE.Matrix4();
+  m.lookAt(camera.position, rhythmCameraTarget, new THREE.Vector3(0, 1, 0));
+  var targetCameraQuat = new THREE.Quaternion().setFromRotationMatrix(m);
+  camera.quaternion.slerp(targetCameraQuat, 0.1);
 
   renderer.render(scene, camera);
   requestAnimationFrame(loop);
@@ -1045,79 +1016,58 @@ var planeTargetY = 100;
 var planeTargetZ = 0;
 
 function updatePlane() {
-
-  game.planeSpeed = 1.4; // 속도 고정 (이전의 min: 1.2, max: 1.6 의 평균)
+  game.planeSpeed = 1.4; 
 
   game.planeCollisionDisplacementX += game.planeCollisionSpeedX;
   game.planeCollisionDisplacementY += game.planeCollisionSpeedY;
 
-  // Incremental Movement
-  var moveSpeed = 0.2 * deltaTime;
-  if (keys.w) targetPos.y += moveSpeed;
-  if (keys.s) targetPos.y -= moveSpeed;
-  if (keys.a) targetPos.z -= moveSpeed;
-  if (keys.d) targetPos.z += moveSpeed;
+  // Y축 좌표 고정.
+  targetPos.y = game.planeDefaultHeight; 
 
-  // Strict Clamping
-  targetPos.y = Math.max(game.planeDefaultHeight - game.planeAmpHeight, Math.min(game.planeDefaultHeight + game.planeAmpHeight, targetPos.y));
-  targetPos.z = Math.max(-100, Math.min(100, targetPos.z));
+  // Z축 목표 좌표 설정.
+  const laneZ = { d: -45, f: -15, j: 15, k: 45 };
 
-  // Physical Interpolation
+  if (keys.d) targetPos.z = laneZ.d;
+  else if (keys.f) targetPos.z = laneZ.f;
+  else if (keys.j) targetPos.z = laneZ.j;
+  else if (keys.k) targetPos.z = laneZ.k;
+
+  // 목표 레인 변경 감지 및 애니메이션 변수 초기화.
+  if (typeof game.lastTargetZ === 'undefined') game.lastTargetZ = targetPos.z;
+  if (game.lastTargetZ !== targetPos.z) {
+    startQuat.copy(airplane.mesh.quaternion);
+    game.bankingDist = 30.0;
+    game.lastTargetZ = targetPos.z;
+  }
+
+  // 위치 선형 보간.
   var pos = airplaneHolder.position;
   var effectiveTargetPos = targetPos.clone();
   effectiveTargetPos.x += game.planeCollisionDisplacementX;
   effectiveTargetPos.y += game.planeCollisionDisplacementY;
+  pos.add(effectiveTargetPos.sub(pos).multiplyScalar(0.25));
 
-  pos.add(effectiveTargetPos.sub(pos).multiplyScalar(0.1));
-
-  // Banking Direction
-  var dy = targetPos.y - airplaneHolder.position.y;
+  // 이동 방향 기반 목표 회전각(Banking) 계산.
   var dz = targetPos.z - airplaneHolder.position.z;
-  var angle = Math.PI / 4;
+  var isMoving = Math.abs(dz) > 1.0; 
 
-  // 매 프레임 targetQuat를 초기화하지 않고 전역 변수를 그대로 사용하여,
-  // 키를 떼었을 때 마지막 기울기 목표(targetQuat)를 기억하도록 합니다.
-  
-  // 대각선 이동을 지원하기 위해 피치(위/아래)와 롤(좌/우)을 각각 계산하여 합성
-  let pitch = 0;
-  let roll = 0;
-  
-  if (keys.w) pitch = angle;
-  if (keys.s) pitch = -angle;
-  if (keys.a) roll = angle;
-  if (keys.d) roll = -angle;
-
-  // 키 입력이 있는 동안에만 새로운 목표 회전값을 계산
-  if (keys.w || keys.s || keys.a || keys.d) {
-    let pitchQuat = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1), pitch);
-    let rollQuat = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), roll);
-    targetQuat.multiplyQuaternions(pitchQuat, rollQuat);
+  if (isMoving) {
+    let rollAngle = (dz > 0) ? -Math.PI / 4 : Math.PI / 4;
+    targetQuat.setFromAxisAngle(new THREE.Vector3(1, 0, 0), rollAngle);
   }
 
-  // Skeleton-based Slerp
-  let actualDist = Math.max(Math.abs(dy), Math.abs(dz));
-
-  // 단타 및 이동 중 자연스러운 기울기(Banking) 애니메이션을 위한 보정 로직
-  if (typeof game.bankingDist === 'undefined') game.bankingDist = 30.0;
-
-  if (keys.w || keys.s || keys.a || keys.d) {
-    // 키를 누르는 동안 dist를 30 -> 15로 부드럽게 감소시켜 t가 0 -> 0.5로 자연스럽게 진행되도록 함 (뱅킹)
+  // 회전 보간 변수(t) 갱신.
+  if (isMoving) {
     game.bankingDist += (15.0 - game.bankingDist) * 0.15;
   } else {
-    // 키를 떼면 dist를 15 -> 0으로 부드럽게 감소시켜 t가 0.5 -> 1.0으로 자연스럽게 진행되도록 함 (수평 복귀)
     game.bankingDist += (0.0 - game.bankingDist) * 0.15;
   }
-
+  
   let dist = game.bankingDist;
   let t = 1.0 - dist / 30.0;
+  t = Math.max(0, Math.min(1, t)); 
 
-  // Correction
-  if (dist > 30.0) {
-    t = 0.0;
-  }
-  t = Math.max(0, Math.min(1, t)); // t 클램핑
-
-  // Two-Phase Logic
+  // 2단계 구면 선형 보간 적용.
   const identityQuat = new THREE.Quaternion();
 
   if (t <= 0.5) {
@@ -1127,15 +1077,10 @@ function updatePlane() {
     airplane.mesh.quaternion.slerpQuaternions(midQuat, identityQuat, (t - 0.5) * 2);
   }
 
-  // Bonus & Polish
+  // 프로펠러 및 행렬 갱신.
   airplane.propeller.rotation.x += 0.3;
-  airplane.mesh.matrix.compose(airplane.mesh.position, airplane.mesh.quaternion, airplane.mesh.scale);
-
-  game.planeCollisionSpeedX += (0 - game.planeCollisionSpeedX) * deltaTime * 0.03;
-  game.planeCollisionDisplacementX += (0 - game.planeCollisionDisplacementX) * deltaTime * 0.01;
-  game.planeCollisionSpeedY += (0 - game.planeCollisionSpeedY) * deltaTime * 0.03;
-  game.planeCollisionDisplacementY += (0 - game.planeCollisionDisplacementY) * deltaTime * 0.01;
-
+  airplane.mesh.matrix.compose(airplane.mesh.position, airplane.mesh.quaternion, airplane.mesh.scale); 
+  
   airplane.pilot.updateHairs();
 }
 
