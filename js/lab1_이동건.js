@@ -5,11 +5,10 @@ const TweenMax = gsap;
 
 var cameraMode = 0; // 0: tracking, 1: free, 2: 1st-person
 
-// 레거시 튜토리얼 색상과 동일하게 맞추기 위해 ColorManagement 비활성화
 THREE.ColorManagement.enabled = false;
 
 // Variables for smooth movement and camera transitions
-var targetPos = new THREE.Vector3(0, 100, 0);
+var targetPos = new THREE.Vector3(0, 100, -15);
 var startQuat = new THREE.Quaternion();
 var midQuat = new THREE.Quaternion();
 var targetQuat = new THREE.Quaternion();
@@ -17,6 +16,7 @@ var endQuat = new THREE.Quaternion();
 var slerpT = 0;
 var cameraTargetPos = new THREE.Vector3();
 var cameraTargetQuat = new THREE.Quaternion();
+
 
 //COLORS
 var Colors = {
@@ -34,12 +34,26 @@ var Colors = {
 
 // GAME VARIABLES
 var game;
+var bgm;
 var deltaTime = 0;
 var newTime = new Date().getTime();
 var oldTime = new Date().getTime();
 var ennemiesPool = [];
 var particlesPool = [];
 var particlesInUse = [];
+const BPM = 138;
+const SEC_PER_BEAT = 60 / BPM; // 138BPM 기준 4분음표 1개당 약 0.4347초
+var isPlaying = false;
+var songStartTime = 0;
+var currentAudioTime = 0;
+var beatmap = [];
+var audioOffset = -0.35;
+
+function formatTime(seconds) {
+  var m = Math.floor(seconds / 60);
+  var s = Math.floor(seconds % 60);
+  return m + ":" + (s < 10 ? "0" : "") + s;
+}
 
 function resetGame() {
   game = {
@@ -79,7 +93,6 @@ function resetGame() {
 
     seaRadius: 600,
     seaLength: 800,
-    //seaRotationSpeed:0.006,
     wavesMinAmp: 5,
     wavesMaxAmp: 20,
     wavesMinSpeed: 0.001,
@@ -89,21 +102,67 @@ function resetGame() {
     cameraNearPos: 150,
     cameraSensivity: 0.002,
 
-    coinDistanceTolerance: 15,
-    coinValue: 3,
-    coinsSpeed: .5,
-    coinLastSpawn: 0,
-    distanceForCoinsSpawn: 100,
-
-    ennemyDistanceTolerance: 10,
-    ennemyValue: 10,
-    ennemiesSpeed: .6,
-    ennemyLastSpawn: 0,
-    distanceForEnnemiesSpawn: 50,
-
     status: "playing",
   };
+
   fieldLevel.innerHTML = Math.floor(game.level);
+  
+  if (typeof airplaneHolder !== 'undefined' && airplaneHolder) {
+      airplaneHolder.position.set(targetPos.x, targetPos.y, targetPos.z);
+      airplaneHolder.rotation.set(0, 0, 0);
+  } else if (typeof airplane !== 'undefined' && airplane && airplane.mesh) {
+      airplane.mesh.position.set(targetPos.x, targetPos.y, targetPos.z);
+      airplane.mesh.rotation.set(0, 0, 0);
+      airplane.mesh.quaternion.identity();
+  }
+
+  // Slerp 보간용 전역 쿼터니언 변수들 초기화
+  if (typeof startQuat !== 'undefined') startQuat.identity();
+  if (typeof targetQuat !== 'undefined') targetQuat.identity();
+  if (typeof midQuat !== 'undefined') midQuat.identity();
+
+  if (typeof airplaneHolder !== 'undefined' && airplaneHolder) {
+      airplaneHolder.position.x = targetPos.x;
+      airplaneHolder.position.y = targetPos.y;
+      airplaneHolder.position.z = targetPos.z;
+  }
+
+  // BGM 재생 상태 및 오디오 컨텍스트 시간 동기화
+  if (typeof bgm !== 'undefined' && bgm.buffer) {
+    bgm.setVolume(0.5);
+    if (isPlaying) bgm.stop();
+    bgm.play();
+    isPlaying = true;
+    songStartTime = bgm.context.currentTime; 
+  }
+
+  // 채보 생성 및 화면에 남은 노트 객체 메모리 해제
+  if (typeof generateBeatmap === 'function') {
+    generateBeatmap();
+  }
+  
+  if (typeof notesHolder !== 'undefined' && notesHolder) {
+    for (let i = 0; i < notesHolder.notesInUse.length; i++) {
+      notesHolder.mesh.remove(notesHolder.notesInUse[i].mesh);
+    }
+    notesHolder.notesInUse = [];
+    notesHolder.spawnedIndex = 0;
+  }
+
+  game.energy = 100;
+  game.combo = 0;
+
+  // 재시작 시 GI 반사광 강도 초기화
+  if (typeof giLightBounce !== 'undefined' && giLightBounce) {
+    giLightBounce.intensity = 0;
+  }
+  
+  if(typeof fieldDistance !== 'undefined') fieldDistance.innerHTML = "000";
+  
+  if(typeof energyBar !== 'undefined') {
+    energyBar.style.right = "0%";
+    energyBar.style.backgroundColor = "#68c3c0";
+  }
 }
 
 //THREEJS RELATED VARIABLES
@@ -137,11 +196,44 @@ function createScene() {
     nearPlane,
     farPlane
   );
-  scene.fog = new THREE.Fog(0xf7d9aa, 100, 950);
+  
+  scene.fog = new THREE.Fog(0x000511, 100, 1500);
+
+  var style = document.createElement('style');
+  style.innerHTML = `
+    body, .game-holder {
+      background: #000511 !important;
+      background-image: none !important;
+    }
+    #world {
+      background: transparent !important;
+    }
+    h1, .header h1, .score__label, .score__content, .score__value, #distValue, #levelValue {
+      color: #ffffff !important;
+    }
+    #distValue, .score__value {
+      color: #ffffff !important;
+    }
+    .score__label {
+      color: #a0aab0 !important;
+    }
+    .header h2 {
+      color: #00ffcc !important;
+    }
+    .score__value--energy {
+      background-color: rgba(255, 255, 255) !important;
+      border-radius: 3px;
+    }
+    .message--replay {
+      color: #00ffcc !important;
+      text-shadow: 0 0 10px rgba(102, 51, 255, 0.6) !important;
+    }
+  `;
+  document.head.appendChild(style);
+
   camera.position.x = 0;
   camera.position.z = 200;
   camera.position.y = game.planeDefaultHeight;
-  //camera.lookAt(new THREE.Vector3(0, 400, 0));
 
   renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true });
   renderer.setSize(WIDTH, HEIGHT);
@@ -158,8 +250,181 @@ function createScene() {
 
   controls = new OrbitControls(camera, renderer.domElement);
   controls.enabled = (cameraMode === 1);
-  // OrbitControls 초기화 시 카메라가 강제로 target(0,0,0)을 바라보게 되므로 회전값을 원래대로 초기화
+
   camera.rotation.set(0, 0, 0);
+}
+
+function createLaneLabels() {
+  const letters = ['D', 'F', 'J', 'K'];
+  const laneZ = [-45, -15, 15, 45];
+  
+  for(let i = 0; i < 4; i++) {
+    let canvas = document.createElement('canvas');
+    canvas.width = 128;
+    canvas.height = 128;
+    let ctx = canvas.getContext('2d');
+    ctx.fillStyle = "rgba(0, 0, 0, 0)"; 
+    ctx.fillRect(0, 0, 128, 128);
+    
+    ctx.fillStyle = "rgba(0, 255, 204, 0.40)";
+    ctx.font = "bold 80px Arial";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(letters[i], 64, 64);
+    
+    let tex = new THREE.CanvasTexture(canvas);
+    let geom = new THREE.PlaneGeometry(35, 35);
+    let mat = new THREE.MeshBasicMaterial({ map: tex, transparent: true, depthWrite: false });
+    let label = new THREE.Mesh(geom, mat);
+    
+    var lineAngle = Math.acos(10 / 689);
+
+    const labelRadius = 670;
+
+    label.position.x = Math.cos(lineAngle) * labelRadius;
+    label.position.y = -600 + Math.sin(lineAngle) * labelRadius;
+    label.position.z = laneZ[i];
+    
+    label.rotation.x = -Math.PI / 2;
+    label.rotation.y = 0.2;
+    
+    scene.add(label);
+  }
+}
+
+function createAudio() {
+  const listener = new THREE.AudioListener();
+  camera.add(listener);
+
+  bgm = new THREE.Audio(listener);
+  const audioLoader = new THREE.AudioLoader();
+
+  audioLoader.load('audio/bad_apple.mp3', function(buffer) {
+    bgm.setBuffer(buffer);
+    bgm.setLoop(false);
+    bgm.setVolume(0.5);
+    console.log("음악 로드 완료.");
+
+    if (replayMessage) replayMessage.innerHTML = "CLICK TO START";
+  });
+
+  document.addEventListener('click', function() {
+    if (game.status === "waitingReplay" && bgm && bgm.buffer) {
+      if (bgm.context.state === 'suspended') {
+        bgm.context.resume().then(function() {
+          hideReplay(); 
+          resetGame();
+        });
+      } else {
+        hideReplay();
+        resetGame();
+      }
+    }
+  });
+}
+
+function triggerGameOver() {
+
+  if (game.status === "gameover" ||
+      game.status === "waitingReplay") {
+    return;
+  }
+
+  game.status = "gameover";
+  isPlaying = false;
+
+  console.log("GAME OVER");
+
+  // 음악 페이드아웃
+  if (bgm && bgm.isPlaying) {
+
+    const startVolume = bgm.getVolume();
+
+    gsap.to(
+      { volume: startVolume },
+      {
+        volume: 0,
+        duration: 2.0,
+        ease: "power2.out",
+
+        onUpdate: function () {
+          bgm.setVolume(this.targets()[0].volume);
+        },
+
+        onComplete: function () {
+          if (bgm.isPlaying) {
+            bgm.stop();
+          }
+
+          bgm.setVolume(0.5);
+        }
+      }
+    );
+  }
+}
+
+var rawBeatmap = "";
+
+function loadBeatmapFile() {
+  fetch('beatmap.txt')
+    .then(response => response.text())
+    .then(text => {
+      rawBeatmap = text;
+      console.log("채보 텍스트 파일 로드 완료.");
+    })
+    .catch(error => console.error("채보 로드 실패:", error));
+}
+
+// 채보 데이터 파싱 및 배열 생성 함수.
+function generateBeatmap() {
+  beatmap = [];
+
+  if (!rawBeatmap || rawBeatmap.trim() === "") return;
+
+  const lanes = [-45, -15, 15, 45];
+  
+  // 최초 시작 시 딜레이 보정.
+  const startOffset = 1.0; 
+  
+  // 개행 문자를 기준으로 텍스트 분리.
+  const lines = rawBeatmap.trim().split('\n');
+  
+  for (let i = 0; i < lines.length; i++) {
+    let line = lines[i].trim();
+    if (line.length !== 4) continue;
+    
+    let counts = [
+      parseInt(line[0]),
+      parseInt(line[1]),
+      parseInt(line[2]),
+      parseInt(line[3])
+    ];
+    
+    // 해당 박자(1비트) 내 총 노트 수 산출.
+    let totalNotes = counts[0] + counts[1] + counts[2] + counts[3];
+    
+    // 빈 박자(0000) 처리.
+    if (totalNotes === 0) continue;
+    
+    // 노트 분할 시간 간격 계산.
+    let subBeatInterval = SEC_PER_BEAT / totalNotes;
+    let noteOffsetIndex = 0;
+    
+    // 좌측 라인부터 노트 순차 배치.
+    for (let laneIdx = 0; laneIdx < 4; laneIdx++) {
+      for (let n = 0; n < counts[laneIdx]; n++) {
+        // 기준 시간에 오프셋 간격을 합산.
+        let hitTime = startOffset + (i * SEC_PER_BEAT) + (noteOffsetIndex * subBeatInterval);
+        
+        beatmap.push({
+          hitTime: hitTime,
+          laneZ: lanes[laneIdx]
+        });
+        
+        noteOffsetIndex++;
+      }
+    }
+  }
 }
 
 // MOUSE AND SCREEN EVENTS
@@ -173,12 +438,13 @@ function handleWindowResize() {
 }
 
 function handleKeyDown(event) {
+  if (game.status !== "playing") return;
+
   var k = event.key.toLowerCase();
-  
   if (['d', 'f', 'j', 'k'].includes(k)) {
     keys[k] = true;
     if (!event.repeat) {
-      startQuat.copy(airplane.mesh.quaternion); // 회전 보간용 시작점 캡처
+      startQuat.copy(airplane.mesh.quaternion);
     }
   }
 }
@@ -198,31 +464,114 @@ function handleTouchMove(event) {
 }
 
 function handleMouseUp(event) {
-  if (game.status == "waitingReplay") {
-    resetGame();
-    hideReplay();
+  if (game.status == "waitingReplay" && bgm && bgm.buffer) {
+    if (bgm.context && bgm.context.state === 'suspended') {
+      bgm.context.resume().then(function() {
+        hideReplay();
+        resetGame();
+      });
+    } else {
+      hideReplay();
+      resetGame();
+    }
   }
 }
 
-
 function handleTouchEnd(event) {
-  if (game.status == "waitingReplay") {
-    resetGame();
-    hideReplay();
+  if (game.status == "waitingReplay" && bgm && bgm.buffer) {
+    if (bgm.context && bgm.context.state === 'suspended') {
+      bgm.context.resume().then(function() {
+        hideReplay();
+        resetGame();
+      });
+    } else {
+      hideReplay();
+      resetGame();
+    }
   }
+}
+
+// 타격 시 전방으로 뻗어나가는 분절된 잔상 이펙트
+function createHitEffect(laneZ) {
+  var tailGroup = new THREE.Group();
+  var numSegments = 8;
+  var step = 1.0 / numSegments;
+
+  var geom = new THREE.BoxGeometry(1, 1, 1);
+  var mat = new THREE.MeshBasicMaterial({
+    color: 0x00ffcc,
+    transparent: true,
+    opacity: 0.9,
+    blending: THREE.AdditiveBlending, 
+    depthWrite: false
+  });
+
+  for (let i = 0; i < numSegments; i++) {
+    let mesh = new THREE.Mesh(geom, mat);
+    
+    let ratio = 1.0 - (i / numSegments); 
+    
+    let sizeX = ratio * step * 0.6; 
+    let sizeY = 2;
+    let sizeZ = 23; 
+
+    mesh.scale.set(sizeX, sizeY, sizeZ);
+    mesh.position.x = step * i + sizeX / 2;
+    
+    tailGroup.add(mesh);
+  }
+
+  tailGroup.position.x = airplaneHolder.position.x+2;
+  tailGroup.position.y = airplaneHolder.position.y-3;
+  tailGroup.position.z = laneZ;
+
+  tailGroup.scale.set(0.1, 1, 1);
+
+  scene.add(tailGroup);
+
+  if (typeof giLightBounce !== 'undefined' && giLightBounce) {
+    giLightBounce.intensity = 45.0; 
+  }
+
+  // GSAP 애니메이션 연출 (속도감은 유지)
+  gsap.to(tailGroup.scale, {
+    x: 100, // 앞으로 뻗어가는 전체 길이
+    duration: 0.1,
+    ease: "power2.out",
+    onComplete: function() {
+      gsap.to(tailGroup.scale, {
+        x: 0,
+        y: 1, 
+        z: 1,
+        duration: 0.15,
+        ease: "power2.in"
+      });
+      gsap.to(mat, {
+        opacity: 0, 
+        duration: 0.25,
+        ease: "power2.in",
+        onComplete: function() {
+          scene.remove(tailGroup);
+          geom.dispose();
+          mat.dispose();
+        }
+      });
+    }
+  });
 }
 
 // LIGHTS
 
 var ambientLight, hemisphereLight, shadowLight;
+var giLightBounce;
 
 function createLights() {
 
-  hemisphereLight = new THREE.HemisphereLight(0xaaaaaa, 0x000000, .9 * Math.PI)
+  hemisphereLight = new THREE.HemisphereLight(0xaaaaaa, 0x000000, .2 * Math.PI)
 
-  ambientLight = new THREE.AmbientLight(0xdc8874, .5 * Math.PI);
+  ambientLight = new THREE.AmbientLight(0xdc8874, .3 * Math.PI);
 
-  shadowLight = new THREE.DirectionalLight(0xffffff, .9 * Math.PI);
+  shadowLight = new THREE.DirectionalLight(0xffffff, .4 * Math.PI);
   shadowLight.position.set(150, 350, 350);
   shadowLight.castShadow = true;
   shadowLight.shadow.camera.left = -400;
@@ -241,6 +590,10 @@ function createLights() {
   scene.add(shadowLight);
   scene.add(ambientLight);
 
+  // 네온 트랙 및 타격 발광이 주변 환경에 미치는 간접광(GI) 표현용 점광원 생성
+  giLightBounce = new THREE.PointLight(0xffffff, 0, 1000, 1.0);
+  giLightBounce.position.set(0, 130, 0); 
+  scene.add(giLightBounce);
 }
 
 
@@ -538,7 +891,9 @@ var Sea = function () {
   geom.setAttribute('aSpeed', new THREE.BufferAttribute(speedArray, 1));
 
   var mat = new THREE.MeshPhongMaterial({
-    color: Colors.blue,
+    color: 0x0077ff,
+    emissive: 0x003366,
+    emissiveIntensity: 0.3,
     transparent: true,
     opacity: .8,
     flatShading: true,
@@ -609,7 +964,6 @@ var Cloud = function () {
     m.receiveShadow = true;
 
   }
-  //*/
 }
 
 Cloud.prototype.rotate = function () {
@@ -621,79 +975,133 @@ Cloud.prototype.rotate = function () {
   }
 }
 
-var Ennemy = function () {
-  var geom = new THREE.TetrahedronGeometry(8, 2);
-  var mat = new THREE.MeshPhongMaterial({
-    color: Colors.red,
-    shininess: 0,
-    specular: 0xffffff,
-    flatShading: true
+// 리듬 게임용 노트 클래스
+var Note = function(hitTime, laneZ, isLong, duration) {
+  var geom = new THREE.BoxGeometry(15, 2, 28); 
+  var mat = new THREE.MeshStandardMaterial({
+    color: 0x00ffcc,       
+    emissive: 0x00ffcc,    
+    emissiveIntensity: 0.8,
+    roughness: 0.2,
+    metalness: 0.8
   });
+  
   this.mesh = new THREE.Mesh(geom, mat);
-  this.mesh.castShadow = true;
-  this.angle = 0;
-  this.dist = 0;
+  this.hitTime = hitTime;
+  this.laneZ = laneZ;
+  this.isLong = isLong || false; 
+  this.duration = duration || 0; 
+  this.angle = 0; 
 }
 
-var EnnemiesHolder = function () {
+var NotesHolder = function() {
   this.mesh = new THREE.Object3D();
-  this.ennemiesInUse = [];
+  this.notesInUse = [];
+  this.spawnedIndex = 0;
 }
 
-EnnemiesHolder.prototype.spawnEnnemies = function () {
-  var nEnnemies = game.level;
+NotesHolder.prototype.updateNotes = function() {
+  if (!isPlaying || !bgm) return;
+  currentAudioTime = bgm.context.currentTime - songStartTime + (typeof audioOffset !== 'undefined' ? audioOffset : 0);
+  
+  // 곡 진행도(Time & Circle) UI 갱신.
+  if (bgm.buffer) {
+    let duration = bgm.buffer.duration;
+    let progressRatio = currentAudioTime / duration;
+    progressRatio = Math.min(1, Math.max(0, progressRatio));
+    
+    if(typeof levelCircle !== 'undefined' && levelCircle) {
+       levelCircle.setAttribute("stroke-dashoffset", 502 - (502 * progressRatio));
+    }
+  }
 
-  for (var i = 0; i < nEnnemies; i++) {
-    var ennemy;
-    if (ennemiesPool.length) {
-      ennemy = ennemiesPool.pop();
+  var angleSpeed = 1.0; 
+  var spawnLeadTime = 2.0; 
+  var hitZoneAngle = Math.acos(10 / 690); 
+  
+  // 노트 스폰 로직.
+  while (this.spawnedIndex < beatmap.length) {
+    var noteData = beatmap[this.spawnedIndex];
+    if (currentAudioTime >= noteData.hitTime - spawnLeadTime) {
+      var note = new Note(noteData.hitTime, noteData.laneZ, noteData.isLong, noteData.duration);
+      this.notesInUse.push(note);
+      this.mesh.add(note.mesh);
+      this.spawnedIndex++;
     } else {
-      ennemy = new Ennemy();
+      break; 
     }
-
-    ennemy.angle = - (i * 0.1);
-    ennemy.distance = game.seaRadius + game.planeDefaultHeight + (-1 + Math.random() * 2) * (game.planeAmpHeight - 20);
-    ennemy.mesh.position.y = -game.seaRadius + Math.sin(ennemy.angle) * ennemy.distance;
-    ennemy.mesh.position.x = Math.cos(ennemy.angle) * ennemy.distance;
-    ennemy.mesh.position.z = -80 + Math.random() * 160;
-
-    this.mesh.add(ennemy.mesh);
-    this.ennemiesInUse.push(ennemy);
+  }
+  
+  // 노트 이동 및 판정.
+  for (var i = 0; i < this.notesInUse.length; i++) {
+    var note = this.notesInUse[i];
+    
+    var timeRemaining = note.hitTime - currentAudioTime;
+    note.angle = hitZoneAngle - (timeRemaining * angleSpeed);
+    
+    var radius = 690;
+    note.mesh.position.x = Math.cos(note.angle) * radius;
+    note.mesh.position.y = -600 + Math.sin(note.angle) * radius;
+    note.mesh.position.z = note.laneZ;
+    note.mesh.rotation.z = note.angle - Math.PI / 2;
+    
+    var laneDiff = Math.abs(airplaneHolder.position.z - note.laneZ);
+    
+    // 타격 성공 (HIT) 처리.
+    if (Math.abs(timeRemaining) < 0.08) { 
+      if (laneDiff < 10) { 
+        this.mesh.remove(note.mesh);
+        this.notesInUse.splice(i, 1);
+        i--;
+        
+        if (typeof createHitEffect === 'function') createHitEffect(note.laneZ); 
+        
+        game.combo++;
+        if(typeof fieldDistance !== 'undefined') {
+          fieldDistance.innerHTML = String(game.combo).padStart(3, '0');
+        }
+        
+        game.energy += 2; 
+        game.energy = Math.min(100, game.energy);
+        if(typeof energyBar !== 'undefined') {
+          energyBar.style.right = (100 - game.energy) + "%";
+          energyBar.style.backgroundColor = (game.energy < 50) ? "#f25346" : "#68c3c0";
+        }
+        
+        continue;
+      }
+    }
+    
+    // 타격 실패 (MISS) 처리.
+    if (timeRemaining < -0.15) { 
+      this.mesh.remove(note.mesh);
+      this.notesInUse.splice(i, 1);
+      i--;
+      
+      game.combo = 0;
+      if(typeof fieldDistance !== 'undefined') {
+        fieldDistance.innerHTML = "000";
+      }
+      
+      game.energy -= 10; 
+      game.energy = Math.max(0, game.energy);
+      if(typeof energyBar !== 'undefined') {
+        energyBar.style.right = (100 - game.energy) + "%";
+        energyBar.style.backgroundColor = (game.energy < 50) ? "#f25346" : "#68c3c0";
+      }
+      
+      if (game.energy <= 0) {
+          triggerGameOver();
+      }
+    }
   }
 }
 
-EnnemiesHolder.prototype.rotateEnnemies = function () {
-  for (var i = 0; i < this.ennemiesInUse.length; i++) {
-    var ennemy = this.ennemiesInUse[i];
-    ennemy.angle += game.speed * deltaTime * game.ennemiesSpeed;
-
-    if (ennemy.angle > Math.PI * 2) ennemy.angle -= Math.PI * 2;
-
-    ennemy.mesh.position.y = -game.seaRadius + Math.sin(ennemy.angle) * ennemy.distance;
-    ennemy.mesh.position.x = Math.cos(ennemy.angle) * ennemy.distance;
-    ennemy.mesh.rotation.z += Math.random() * .1;
-    ennemy.mesh.rotation.y += Math.random() * .1;
-
-    //var globalEnnemyPosition =  ennemy.mesh.localToWorld(new THREE.Vector3());
-    var diffPos = airplaneHolder.position.clone().sub(ennemy.mesh.position.clone());
-    var d = diffPos.length();
-    if (d < game.ennemyDistanceTolerance) {
-      particlesHolder.spawnParticles(ennemy.mesh.position.clone(), 15, Colors.red, 3);
-
-      ennemiesPool.unshift(this.ennemiesInUse.splice(i, 1)[0]);
-      this.mesh.remove(ennemy.mesh);
-      game.planeCollisionSpeedX = 100 * diffPos.x / d;
-      game.planeCollisionSpeedY = 100 * diffPos.y / d;
-      ambientLight.intensity = 2;
-
-      removeEnergy();
-      i--;
-    } else if (ennemy.angle > Math.PI) {
-      ennemiesPool.unshift(this.ennemiesInUse.splice(i, 1)[0]);
-      this.mesh.remove(ennemy.mesh);
-      i--;
-    }
-  }
+// 씬에 노트 매니저를 추가하는 함수
+var notesHolder;
+function createNotes() {
+  notesHolder = new NotesHolder();
+  scene.add(notesHolder.mesh);
 }
 
 var Particle = function () {
@@ -766,74 +1174,11 @@ var Coin = function () {
   this.dist = 0;
 }
 
-var CoinsHolder = function (nCoins) {
-  this.mesh = new THREE.Object3D();
-  this.coinsInUse = [];
-  this.coinsPool = [];
-  for (var i = 0; i < nCoins; i++) {
-    var coin = new Coin();
-    this.coinsPool.push(coin);
-  }
-}
-
-CoinsHolder.prototype.spawnCoins = function () {
-
-  var nCoins = 1 + Math.floor(Math.random() * 10);
-  var d = game.seaRadius + game.planeDefaultHeight + (-1 + Math.random() * 2) * (game.planeAmpHeight - 20);
-  var amplitude = 10 + Math.round(Math.random() * 10);
-  var zOffset = -80 + Math.random() * 160;
-  for (var i = 0; i < nCoins; i++) {
-    var coin;
-    if (this.coinsPool.length) {
-      coin = this.coinsPool.pop();
-    } else {
-      coin = new Coin();
-    }
-    this.mesh.add(coin.mesh);
-    this.coinsInUse.push(coin);
-    coin.angle = - (i * 0.02);
-    coin.distance = d + Math.cos(i * .5) * amplitude;
-    coin.mesh.position.y = -game.seaRadius + Math.sin(coin.angle) * coin.distance;
-    coin.mesh.position.x = Math.cos(coin.angle) * coin.distance;
-  }
-}
-
-CoinsHolder.prototype.rotateCoins = function () {
-  for (var i = 0; i < this.coinsInUse.length; i++) {
-    var coin = this.coinsInUse[i];
-    if (coin.exploding) continue;
-    coin.angle += game.speed * deltaTime * game.coinsSpeed;
-    if (coin.angle > Math.PI * 2) coin.angle -= Math.PI * 2;
-    coin.mesh.position.y = -game.seaRadius + Math.sin(coin.angle) * coin.distance;
-    coin.mesh.position.x = Math.cos(coin.angle) * coin.distance;
-    coin.mesh.rotation.z += Math.random() * .1;
-    coin.mesh.rotation.y += Math.random() * .1;
-
-    //var globalCoinPosition =  coin.mesh.localToWorld(new THREE.Vector3());
-    var diffPos = airplaneHolder.position.clone().sub(coin.mesh.position.clone());
-    var d = diffPos.length();
-    if (d < game.coinDistanceTolerance) {
-      this.coinsPool.unshift(this.coinsInUse.splice(i, 1)[0]);
-      this.mesh.remove(coin.mesh);
-      particlesHolder.spawnParticles(coin.mesh.position.clone(), 5, 0x009999, .8);
-      addEnergy();
-      i--;
-    } else if (coin.angle > Math.PI) {
-      this.coinsPool.unshift(this.coinsInUse.splice(i, 1)[0]);
-      this.mesh.remove(coin.mesh);
-      i--;
-    }
-  }
-}
-
-
 // 3D Models
 var sea;
 var airplane;
 var airplaneHolder;
 var sky;
-var coinsHolder;
-var ennemiesHolder;
 var particlesHolder;
 
 function createPlane() {
@@ -859,26 +1204,97 @@ function createSea() {
   scene.add(sea.mesh);
 }
 
+function createLanes() {
+  const laneRadius = 690; 
+  
+  const laneZPositions = [-60, -30, 0, 30, 60];
+
+  laneZPositions.forEach((zPos) => {
+    const isOuter = (zPos === -60 || zPos === 60);
+    
+    const tubeThickness = isOuter ? 1.5 : 0.5;
+
+    const geom = new THREE.TorusGeometry(laneRadius, tubeThickness, 8, 100);
+    
+    const mat = new THREE.MeshStandardMaterial({ 
+      color: 0x00ffcc, 
+      emissive: 0x888888,
+      roughness: 0.1,
+      metalness: 0.8
+    }); 
+    
+    const ring = new THREE.Mesh(geom, mat);
+
+    ring.position.y = -600;
+    ring.position.z = zPos;
+    
+    scene.add(ring);
+  });
+}
+
+// 시각적 판정선 생성.
+function createJudgmentLine() {
+  var lineAngle = Math.acos(10 / 689);
+
+  var geom = new THREE.BoxGeometry(1, 1, 110);
+  var mat = new THREE.MeshBasicMaterial({
+    color: 0x00ffcc,
+    transparent: true,
+    opacity: 0.5
+  });
+  var judgmentLine = new THREE.Mesh(geom, mat);
+  
+ judgmentLine.position.x = Math.cos(lineAngle) * 692; 
+  judgmentLine.position.y = -600 + Math.sin(lineAngle) * 692; 
+  judgmentLine.position.z = 0;
+  judgmentLine.rotation.z = lineAngle - Math.PI / 2; 
+  
+  scene.add(judgmentLine);
+}
+
 function createSky() {
   sky = new Sky();
   sky.mesh.position.y = -game.seaRadius;
   scene.add(sky.mesh);
 }
 
-function createCoins() {
+function createStars() {
 
-  coinsHolder = new CoinsHolder(20);
-  scene.add(coinsHolder.mesh)
-}
+    const geometry =
+        new THREE.BufferGeometry();
 
-function createEnnemies() {
-  for (var i = 0; i < 10; i++) {
-    var ennemy = new Ennemy();
-    ennemiesPool.push(ennemy);
-  }
-  ennemiesHolder = new EnnemiesHolder();
-  //ennemiesHolder.mesh.position.y = -game.seaRadius;
-  scene.add(ennemiesHolder.mesh)
+    const vertices = [];
+
+    for(let i=0;i<1000;i++){
+
+        vertices.push(
+            (Math.random()-0.5)*8000,
+            Math.random()*4000,
+            (Math.random()-0.5)*4000
+        );
+    }
+
+    geometry.setAttribute(
+        'position',
+        new THREE.Float32BufferAttribute(
+            vertices,
+            3
+        )
+    );
+
+    const material =
+        new THREE.PointsMaterial({
+            size: 8,
+            fog: false
+        });
+
+    const stars =
+        new THREE.Points(
+            geometry,
+            material
+        );
+
+    scene.add(stars);
 }
 
 function createParticles() {
@@ -887,7 +1303,6 @@ function createParticles() {
     particlesPool.push(particle);
   }
   particlesHolder = new ParticlesHolder();
-  //ennemiesHolder.mesh.position.y = -game.seaRadius;
   scene.add(particlesHolder.mesh)
 }
 
@@ -899,37 +1314,23 @@ function loop() {
 
   if (game.status == "playing") {
 
-    // Add energy coins every 100m;
-    if (Math.floor(game.distance) % game.distanceForCoinsSpawn == 0 && Math.floor(game.distance) > game.coinLastSpawn) {
-      game.coinLastSpawn = Math.floor(game.distance);
-      coinsHolder.spawnCoins();
-    }
-
-    if (Math.floor(game.distance) % game.distanceForSpeedUpdate == 0 && Math.floor(game.distance) > game.speedLastUpdate) {
-      game.speedLastUpdate = Math.floor(game.distance);
-      game.targetBaseSpeed += game.incrementSpeedByTime * deltaTime;
-    }
-
-
-    if (Math.floor(game.distance) % game.distanceForEnnemiesSpawn == 0 && Math.floor(game.distance) > game.ennemyLastSpawn) {
-      game.ennemyLastSpawn = Math.floor(game.distance);
-      ennemiesHolder.spawnEnnemies();
-    }
-
-    if (Math.floor(game.distance) % game.distanceForLevelUpdate == 0 && Math.floor(game.distance) > game.levelLastUpdate) {
-      game.levelLastUpdate = Math.floor(game.distance);
-      game.level++;
-      fieldLevel.innerHTML = Math.floor(game.level);
-
-      game.targetBaseSpeed = game.initSpeed + game.incrementSpeedByLevel * game.level
-    }
+    if (typeof notesHolder !== 'undefined') {
+      notesHolder.updateNotes();
+      }
 
 
     updatePlane();
-    updateDistance();
-    updateEnergy();
     game.baseSpeed += (game.targetBaseSpeed - game.baseSpeed) * deltaTime * 0.02;
     game.speed = game.baseSpeed * game.planeSpeed;
+
+    // 음원 비트에 동기화된 트랙의 간접 반사광(GI) 실시간 보간 및 감쇄 연산
+    if (typeof giLightBounce !== 'undefined' && giLightBounce && isPlaying) {
+      var beatProgress = (currentAudioTime % SEC_PER_BEAT) / SEC_PER_BEAT;
+      var pulseIntensity = Math.sin(beatProgress * Math.PI) * 5.0;
+      
+      // 라이트 인텐시티를 목표값으로 부드럽게 감쇄 보간
+      giLightBounce.intensity += (pulseIntensity - giLightBounce.intensity) * 0.1;
+    }
 
   } else if (game.status == "gameover") {
     game.speed *= .99;
@@ -953,14 +1354,11 @@ function loop() {
 
   ambientLight.intensity += (.5 - ambientLight.intensity) * deltaTime * 0.005;
 
-  coinsHolder.rotateCoins();
-  ennemiesHolder.rotateEnnemies();
-
   sky.moveClouds();
   sea.moveWaves();
 
-  var rhythmCameraPos = new THREE.Vector3(-150, 300, 0); // x: 뒤로, y: 위로 (트랙이 잘 보이게 조절)
-  var rhythmCameraTarget = new THREE.Vector3(0, 200, 0); // 판정선(비행기) 쪽을 바라봄
+  var rhythmCameraPos = new THREE.Vector3(-150, 300, 0);
+  var rhythmCameraTarget = new THREE.Vector3(0, 200, 0);
 
   camera.position.lerp(rhythmCameraPos, 0.1);
 
@@ -996,7 +1394,7 @@ function updateEnergy() {
   }
 
   if (game.energy < 1) {
-    game.status = "gameover";
+    triggerGameOver();
   }
 }
 
@@ -1013,7 +1411,7 @@ function removeEnergy() {
 
 
 var planeTargetY = 100;
-var planeTargetZ = 0;
+var planeTargetZ = -15;
 
 function updatePlane() {
   game.planeSpeed = 1.4; 
@@ -1021,10 +1419,7 @@ function updatePlane() {
   game.planeCollisionDisplacementX += game.planeCollisionSpeedX;
   game.planeCollisionDisplacementY += game.planeCollisionSpeedY;
 
-  // Y축 좌표 고정.
   targetPos.y = game.planeDefaultHeight; 
-
-  // Z축 목표 좌표 설정.
   const laneZ = { d: -45, f: -15, j: 15, k: 45 };
 
   if (keys.d) targetPos.z = laneZ.d;
@@ -1032,11 +1427,21 @@ function updatePlane() {
   else if (keys.j) targetPos.z = laneZ.j;
   else if (keys.k) targetPos.z = laneZ.k;
 
-  // 목표 레인 변경 감지 및 애니메이션 변수 초기화.
+  // 목표 레인 변경 감지 및 거리 비례 애니메이션 변수 초기화
   if (typeof game.lastTargetZ === 'undefined') game.lastTargetZ = targetPos.z;
+  if (typeof game.bankingDist === 'undefined') game.bankingDist = 0.0;
+  
   if (game.lastTargetZ !== targetPos.z) {
     startQuat.copy(airplane.mesh.quaternion);
     game.bankingDist = 30.0;
+    
+    let totalMoveDist = targetPos.z - airplaneHolder.position.z;
+    
+    let maxAngle = Math.PI / 3; 
+    let rollAngle = -(totalMoveDist / 90.0) * maxAngle; 
+
+    targetQuat.setFromAxisAngle(new THREE.Vector3(1, 0, 0), rollAngle);
+    
     game.lastTargetZ = targetPos.z;
   }
 
@@ -1047,14 +1452,9 @@ function updatePlane() {
   effectiveTargetPos.y += game.planeCollisionDisplacementY;
   pos.add(effectiveTargetPos.sub(pos).multiplyScalar(0.25));
 
-  // 이동 방향 기반 목표 회전각(Banking) 계산.
+  // 이동 중인지 판단.
   var dz = targetPos.z - airplaneHolder.position.z;
   var isMoving = Math.abs(dz) > 1.0; 
-
-  if (isMoving) {
-    let rollAngle = (dz > 0) ? -Math.PI / 4 : Math.PI / 4;
-    targetQuat.setFromAxisAngle(new THREE.Vector3(1, 0, 0), rollAngle);
-  }
 
   // 회전 보간 변수(t) 갱신.
   if (isMoving) {
@@ -1112,22 +1512,37 @@ function init(event) {
   replayMessage = document.getElementById("replayMessage");
   fieldLevel = document.getElementById("levelValue");
   levelCircle = document.getElementById("levelCircleStroke");
+  var distLabel = document.querySelector('#dist .score__label');
+  if(distLabel) distLabel.innerHTML = "COMBO";
+  var energyLabel = document.querySelector('#energy .score__label');
+  if(energyLabel) energyLabel.innerHTML = "HP";
+  var levelLabel = document.querySelector('#level .score__label');
+  if(levelLabel) levelLabel.innerHTML = "TIME";
 
   resetGame();
+  game.status = "waitingReplay";
+  if (replayMessage) replayMessage.innerHTML = "LOADING...";
+  showReplay();
   createScene();
+  createStars();
 
   createLights();
   createPlane();
   createSea();
+  createLanes();
+  createJudgmentLine();
   createSky();
-  createCoins();
-  createEnnemies();
+  createNotes();
   createParticles();
+  createAudio();
+  createLaneLabels();
 
   document.addEventListener('keydown', handleKeyDown, false);
   document.addEventListener('keyup', handleKeyUp, false);
   document.addEventListener('mouseup', handleMouseUp, false);
   document.addEventListener('touchend', handleTouchEnd, false);
+
+  loadBeatmapFile();
 
   loop();
 }
